@@ -3,23 +3,42 @@ import re
 import sys
 import time
 import json
-import zipfile
 import shutil
+import zipfile
 import logging
-import tempfile
 import subprocess
 from datetime import datetime
 from threading import Thread
+
+# Logging configuration
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
+
+def install_system_package(package_name, import_target=None):
+    """Auto-installs required packages if missing to prevent boot crashes."""
+    target = import_target or package_name
+    try:
+        __import__(target)
+    except ImportError:
+        logging.warning(f"Package '{package_name}' not found. Installing now...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+            logging.info(f"Package '{package_name}' installed successfully.")
+        except Exception as err:
+            logging.critical(f"Failed to install package '{package_name}': {err}")
+
+# Verify essential system packages
+install_system_package("Flask", "flask")
+install_system_package("pyTelegramBotAPI", "telebot")
+install_system_package("requests", "requests")
+
 from flask import Flask
 import telebot
 from telebot import types
 
-# لاگنگ کنفیگریشن
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
-# === بنیادی کنفیگریشن ===
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8965571841:AAEoQpR1Uyfww0YSJB0ev6RMH9qIfLftC3Q")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "8122951733"))  # اپنا ٹیلیگرام عددی یوزر آئی ڈی درج کریں
+# === Default Bot Credentials (with Safe Fallbacks) ===
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8965571841:AAEoQpR1Uyfww0YSJB0ev6RMH9qIfLftC3Q").strip()
+raw_admin = os.environ.get("ADMIN_ID", "8122951733").strip().lstrip("@")
+ADMIN_ID = int(raw_admin) if raw_admin.isdigit() else 8122951733
 
 BASE_DIR = os.getcwd()
 PROJECTS_DIR = os.path.join(BASE_DIR, "hosted_projects")
@@ -29,34 +48,29 @@ BACKUPS_TEMP_DIR = os.path.join(BASE_DIR, "temp_backups")
 os.makedirs(PROJECTS_DIR, exist_ok=True)
 os.makedirs(BACKUPS_TEMP_DIR, exist_ok=True)
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
-
-# فعال پروسیسز اور پروجیکٹس ڈیٹا
-# Format: { "project_name": { "status": "running|stopped", "dir": str, "entry": str, "runtime": "python|node", "process": Popen } }
+# Lightweight Flask server for 24/7 keep-alive checks
+flask_app = Flask(__name__)
 DEPLOYED_BOTS = {}
 
-# 24/7 لائیو رکھنے کے لیے فلاسکی ویب سرور
-flask_app = Flask(__name__)
-
 @flask_app.route("/")
-def index():
-    return "Enterprise Bot Host Manager is Active 24/7!", 200
+def home_index():
+    return "Enterprise Telegram Host Manager with Auto-Restart is 24/7 Online!", 200
 
 @flask_app.route("/health")
-def health():
-    active_count = len([b for b in DEPLOYED_BOTS.values() if b.get("status") == "running"])
-    return {"status": "healthy", "active_bots": active_count, "total_projects": len(DEPLOYED_BOTS)}, 200
+def health_check():
+    running_count = sum(1 for b in DEPLOYED_BOTS.values() if b.get("status") == "running")
+    return {
+        "status": "healthy",
+        "running_bots": running_count,
+        "total_projects": len(DEPLOYED_BOTS),
+        "admin_configured": bool(ADMIN_ID)
+    }, 200
 
-def run_flask():
+def launch_flask_server():
     port = int(os.environ.get("PORT", 8080))
-    flask_app.run(host="0.0.0.0", port=port)
+    logging.info(f"Flask server listening on port {port}...")
+    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
-def start_keep_alive():
-    web_thread = Thread(target=run_flask, daemon=True)
-    web_thread.start()
-    logging.info("Flask Keep-Alive سرور پس منظر میں فعال ہو چکا ہے۔")
-
-# پائیتھن پیکیج میپنگ برائے امپورٹ ٹو پپ
 PACKAGE_MAPPINGS = {
     "telebot": "pyTelegramBotAPI",
     "telegram": "python-telegram-bot",
@@ -85,25 +99,25 @@ STANDARD_LIBS = set(sys.builtin_module_names) | {
     "typing", "base64", "glob", "platform", "signal", "inspect", "io", "string", "zipfile"
 }
 
-# --- ڈیٹا بیس اور پرزسٹینس فنکشنز ---
 def save_metadata():
-    """پروجیکٹس کی لسٹ کو ڈسک پر محفوظ کرتا ہے تاکہ سرور ری بوٹ پر ڈیٹا ضائع نہ ہو"""
+    """Persists project configuration data to disk."""
     data_to_save = {}
     for name, info in DEPLOYED_BOTS.items():
         data_to_save[name] = {
             "dir": info.get("dir"),
             "entry": info.get("entry"),
             "runtime": info.get("runtime", "python"),
-            "status": "stopped"  # سرور ری اسٹارٹ پر پروسیسز فریش شروع ہوں گے
+            "status": info.get("status", "stopped"),
+            "auto_restart": info.get("auto_restart", True)
         }
     try:
         with open(METADATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data_to_save, f, indent=2)
     except Exception as e:
-        logging.error(f"ڈیٹا محفوظ کرنے میں خرابی: {e}")
+        logging.error(f"Failed to save metadata database: {e}")
 
 def load_metadata():
-    """ڈسک سے پروجیکٹس کی لسٹ لوڈ کرتا ہے"""
+    """Loads previously saved projects from disk on startup."""
     global DEPLOYED_BOTS
     if os.path.exists(METADATA_FILE):
         try:
@@ -116,28 +130,28 @@ def load_metadata():
                             "entry": info.get("entry"),
                             "runtime": info.get("runtime", "python"),
                             "status": "stopped",
+                            "auto_restart": info.get("auto_restart", True),
                             "process": None
                         }
-            logging.info(f"{len(DEPLOYED_BOTS)} پروجیکٹس کامیابی سے ڈیٹا بیس سے بحال ہو گئے۔")
+            logging.info(f"Loaded {len(DEPLOYED_BOTS)} projects from metadata database.")
         except Exception as e:
-            logging.error(f"ڈیٹا لوڈ کرنے میں خرابی: {e}")
+            logging.error(f"Error loading metadata database: {e}")
 
 def admin_only(func):
-    """سیکیورٹی پروٹیکشن برائے ایڈمن"""
+    """Admin-only access gatekeeper."""
     def wrapper(message_or_call, *args, **kwargs):
         user_id = message_or_call.from_user.id
-        if user_id != ADMIN_ID:
+        if ADMIN_ID != 0 and user_id != ADMIN_ID:
             if isinstance(message_or_call, types.CallbackQuery):
-                bot.answer_callback_query(message_or_call.id, "❌ رسائی مسترد: آپ ایڈمن نہیں ہیں۔", show_alert=True)
+                bot.answer_callback_query(message_or_call.id, "Access Denied: You are not authorized.", show_alert=True)
             else:
-                bot.reply_to(message_or_call, "❌ <b>رسائی مسترد:</b> یہ بوٹ صرف ایڈمن کے لیے وقف ہے۔")
+                bot.reply_to(message_or_call, "<b>Access Denied:</b> This bot is restricted to the administrator.")
             return
         return func(message_or_call, *args, **kwargs)
     return wrapper
 
-# --- آٹو ڈیپینڈینسی اینڈ اینٹری پوائنٹ اینالائزر ---
 def scan_python_imports(file_path):
-    """پائیتھن فائل کو پڑھ کر بغیر سنٹیکس ایرر کے لائبریریوں کا تعین کرنا"""
+    """Scans python code to automatically extract external dependencies."""
     packages = set()
     try:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -151,12 +165,11 @@ def scan_python_imports(file_path):
                     if pkg and pkg not in STANDARD_LIBS:
                         packages.add(PACKAGE_MAPPINGS.get(pkg, pkg))
     except Exception as e:
-        logging.warning(f"لائبریری اسکیننگ وارننگ: {e}")
+        logging.warning(f"Import scanning warning: {e}")
     return packages
 
 def detect_entry_point(folder_path):
-    """پروجیکٹ فولڈر میں سے مین ایگزیکیوشن فائل تلاش کرنا"""
-    # ترجیحی فائلیں
+    """Detects the main execution entry file of the project."""
     preferred = ["bot.py", "main.py", "app.py", "run.py", "index.py", "index.js", "bot.js"]
     for pref in preferred:
         target = os.path.join(folder_path, pref)
@@ -164,25 +177,19 @@ def detect_entry_point(folder_path):
             runtime = "node" if pref.endswith(".js") else "python"
             return pref, runtime
 
-    # اگر مخصوص فائل نہ ملے تو کوئی بھی .py یا .js فائل تلاش کریں
     for root, _, files in os.walk(folder_path):
         for f in files:
             if f.endswith(".py"):
-                rel_path = os.path.relpath(os.path.join(root, f), folder_path)
-                return rel_path, "python"
+                return os.path.relpath(os.path.join(root, f), folder_path), "python"
             elif f.endswith(".js"):
-                rel_path = os.path.relpath(os.path.join(root, f), folder_path)
-                return rel_path, "node"
+                return os.path.relpath(os.path.join(root, f), folder_path), "node"
 
     return None, None
 
 def install_dependencies(project_dir, runtime):
-    """ضروری پیکیجز خودکار انسٹال کرنا"""
-    installed_summary = []
+    """Auto-generates requirements.txt and installs packages."""
     req_file = os.path.join(project_dir, "requirements.txt")
-
     if runtime == "python":
-        # اگر requirements.txt پہلے سے موجود نہ ہو تو تمام .py فائلوں کو اسکین کر کے بنائیں
         if not os.path.exists(req_file):
             all_pkgs = set()
             for root, _, files in os.walk(project_dir):
@@ -194,66 +201,44 @@ def install_dependencies(project_dir, runtime):
                     for p in sorted(all_pkgs):
                         rf.write(f"{p}\n")
 
-        # پپ سے انسٹال کریں
         if os.path.exists(req_file) and os.path.getsize(req_file) > 0:
             try:
                 subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req_file])
-                installed_summary.append("Python Requirements Installed")
             except Exception as e:
-                logging.error(f"Pip Error: {e}")
-                installed_summary.append("Pip Warning/Error")
+                logging.error(f"Pip installation error: {e}")
 
-    elif runtime == "node":
-        pkg_json = os.path.join(project_dir, "package.json")
-        if os.path.exists(pkg_json):
-            try:
-                subprocess.check_call(["npm", "install"], cwd=project_dir)
-                installed_summary.append("NPM Packages Installed")
-            except Exception as e:
-                logging.error(f"NPM Error: {e}")
-                installed_summary.append("NPM Error")
-
-    return installed_summary
-
-# --- پروسیس مینجمنٹ انجن ---
 def launch_project(name):
-    """کسی پروجیکٹ کو بیک گراؤنڈ میں چلانا اور لاگ فائل بائنڈ کرنا"""
+    """Launches a project background process with log redirection."""
     info = DEPLOYED_BOTS.get(name)
     if not info:
-        return False, "پروجیکٹ نہیں ملا۔"
+        return False, "Project not found."
 
     project_dir = info["dir"]
     entry_file = info.get("entry")
     runtime = info.get("runtime", "python")
 
     if not entry_file:
-        return False, "کوئی چلانے کے قابل فائل موجود نہیں ہے۔"
+        return False, "Main execution entry file is missing."
 
     log_path = os.path.join(project_dir, "output.log")
     log_file = open(log_path, "a", encoding="utf-8")
-
     cmd = [sys.executable, entry_file] if runtime == "python" else ["node", entry_file]
 
     try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=project_dir,
-            stdout=log_file,
-            stderr=subprocess.STDOUT
-        )
+        proc = subprocess.Popen(cmd, cwd=project_dir, stdout=log_file, stderr=subprocess.STDOUT)
         info["process"] = proc
         info["status"] = "running"
         info["log_file"] = log_path
         save_metadata()
-        return True, "پروجیکٹ کامیابی کے ساتھ آن لائن ہو چکا ہے۔"
+        return True, "Project is now online and active."
     except Exception as e:
-        return False, f"ایگزیکیوشن ایرر: {str(e)}"
+        return False, f"Execution failed: {str(e)}"
 
-def stop_project(name):
-    """چلتے ہوئے بوٹ کے پروسیس کو بند کرنا"""
+def stop_project(name, mark_stopped=True):
+    """Stops an active project process."""
     info = DEPLOYED_BOTS.get(name)
     if not info:
-        return False, "پروجیکٹ نہیں ملا۔"
+        return False, "Project not found."
 
     proc = info.get("process")
     if proc and proc.poll() is None:
@@ -263,62 +248,97 @@ def stop_project(name):
         except subprocess.TimeoutExpired:
             proc.kill()
 
-    info["status"] = "stopped"
+    if mark_stopped:
+        info["status"] = "stopped"
     info["process"] = None
     save_metadata()
-    return True, "پروجیکٹ بند کر دیا گیا۔"
+    return True, "Project has been stopped."
 
-# --- بیک اپ انجن (Zip Compression) ---
+# ==================== Automated Watchdog & 24H Refresh Engine ====================
+def background_watchdog():
+    """
+    Background daemon running every 15 seconds:
+    1. Checks if any active bot crashed and immediately auto-restarts it.
+    2. Runs a 24-hour maintenance cycle to prevent memory leaks and zombie processes.
+    """
+    logging.info("Automated protection watchdog thread initialized.")
+    last_24h_cycle = time.time()
+
+    while True:
+        try:
+            time.sleep(15)
+            current_time = time.time()
+
+            # 1. Crash recovery check
+            for name, info in list(DEPLOYED_BOTS.items()):
+                if info.get("status") == "running" and info.get("auto_restart", True):
+                    proc = info.get("process")
+                    if proc is None or proc.poll() is not None:
+                        logging.warning(f"Bot '{name}' is offline. Watchdog is restarting it...")
+                        launch_project(name)
+
+            # 2. 24-Hour scheduled maintenance cycle (86400 seconds)
+            if current_time - last_24h_cycle >= 86400:
+                logging.info("24-Hour cycle reached: Running maintenance refresh and cleanup...")
+                for name, info in list(DEPLOYED_BOTS.items()):
+                    if info.get("status") == "running":
+                        logging.info(f"24h refresh: Restarting '{name}'")
+                        stop_project(name, mark_stopped=False)
+                        time.sleep(1)
+                        launch_project(name)
+
+                # Clear old temporary zip backups
+                shutil.rmtree(BACKUPS_TEMP_DIR, ignore_errors=True)
+                os.makedirs(BACKUPS_TEMP_DIR, exist_ok=True)
+                last_24h_cycle = current_time
+                logging.info("24-Hour scheduled maintenance completed successfully.")
+
+        except Exception as err:
+            logging.error(f"Watchdog exception encountered: {err}")
+            time.sleep(10)
+
 def create_project_backup(name):
-    """سنگل پروجیکٹ کی مکمل زپ فائل بناتا ہے"""
+    """Creates a zip backup for an individual project."""
     info = DEPLOYED_BOTS.get(name)
     if not info or not os.path.exists(info["dir"]):
         return None
 
     project_dir = info["dir"]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    zip_filename = f"{name}_backup_{timestamp}.zip"
-    zip_filepath = os.path.join(BACKUPS_TEMP_DIR, zip_filename)
+    zip_filepath = os.path.join(BACKUPS_TEMP_DIR, f"{name}_backup_{timestamp}.zip")
 
     with zipfile.ZipFile(zip_filepath, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for root, dirs, files in os.walk(project_dir):
-            # غیر ضروری فولڈرز نکال دیں تاکہ سائز چھوٹا رہے
             dirs[:] = [d for d in dirs if d not in ["__pycache__", ".git", "node_modules"]]
             for file in files:
                 full_path = os.path.join(root, file)
-                rel_path = os.path.relpath(full_path, project_dir)
-                zipf.write(full_path, arcname=rel_path)
+                zipf.write(full_path, arcname=os.path.relpath(full_path, project_dir))
 
     return zip_filepath
 
 def create_full_system_backup():
-    """تمام پروجیکٹس اور ڈیٹا بیس کا مکمل سسٹم زپ بناتا ہے"""
+    """Creates a full archive backup of all projects and the database."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    zip_filename = f"FULL_SYSTEM_BACKUP_{timestamp}.zip"
-    zip_filepath = os.path.join(BACKUPS_TEMP_DIR, zip_filename)
+    zip_filepath = os.path.join(BACKUPS_TEMP_DIR, f"FULL_SYSTEM_BACKUP_{timestamp}.zip")
 
     with zipfile.ZipFile(zip_filepath, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        # پروجیکٹس ڈائریکٹری محفوظ کریں
         for root, dirs, files in os.walk(PROJECTS_DIR):
             dirs[:] = [d for d in dirs if d not in ["__pycache__", ".git", "node_modules"]]
             for file in files:
                 full_path = os.path.join(root, file)
-                rel_path = os.path.relpath(full_path, BASE_DIR)
-                zipf.write(full_path, arcname=rel_path)
-        # ڈیٹا بیس فائل شامل کریں
+                zipf.write(full_path, arcname=os.path.relpath(full_path, BASE_DIR))
         if os.path.exists(METADATA_FILE):
             zipf.write(METADATA_FILE, arcname="projects_db.json")
 
     return zip_filepath
 
-# --- کی بورڈز اور UI ---
 def get_main_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=2)
-    b1 = types.InlineKeyboardButton("📋 مائی پروجیکٹس", callback_data="btn_list")
-    b2 = types.InlineKeyboardButton("📊 سرور مانیٹر", callback_data="btn_status")
-    b3 = types.InlineKeyboardButton("💾 مکمل سسٹم بیک اپ", callback_data="btn_full_backup")
-    b4 = types.InlineKeyboardButton("🔄 ری اسٹارٹ آل", callback_data="btn_restart_all")
-    b5 = types.InlineKeyboardButton("ℹ️ رہنمائی / طریقہ کار", callback_data="btn_help")
+    b1 = types.InlineKeyboardButton("📋 My Projects", callback_data="btn_list")
+    b2 = types.InlineKeyboardButton("📊 Server Monitor", callback_data="btn_status")
+    b3 = types.InlineKeyboardButton("💾 Full System Backup", callback_data="btn_full_backup")
+    b4 = types.InlineKeyboardButton("🔄 Restart All", callback_data="btn_restart_all")
+    b5 = types.InlineKeyboardButton("ℹ️ Help & Guide", callback_data="btn_help")
     markup.add(b1, b2)
     markup.add(b3, b4)
     markup.add(b5)
@@ -329,12 +349,12 @@ def get_project_keyboard(name):
     info = DEPLOYED_BOTS.get(name, {})
     is_running = info.get("status") == "running"
 
-    toggle_btn = types.InlineKeyboardButton("⏹ اسٹاپ کریں", callback_data=f"stop_{name}") if is_running else types.InlineKeyboardButton("▶️ اسٹارٹ کریں", callback_data=f"start_{name}")
-    restart_btn = types.InlineKeyboardButton("🔄 ری اسٹارٹ", callback_data=f"restart_{name}")
-    logs_btn = types.InlineKeyboardButton("📜 لائیو لاگز", callback_data=f"logs_{name}")
-    backup_btn = types.InlineKeyboardButton("📦 بیک اپ زپ حاصل کریں", callback_data=f"backup_{name}")
-    delete_btn = types.InlineKeyboardButton("🗑️ ڈیلیٹ کریں", callback_data=f"delete_{name}")
-    back_btn = types.InlineKeyboardButton("⬅️ پروجیکٹس لسٹ", callback_data="btn_list")
+    toggle_btn = types.InlineKeyboardButton("⏹ Stop", callback_data=f"stop_{name}") if is_running else types.InlineKeyboardButton("▶️ Start", callback_data=f"start_{name}")
+    restart_btn = types.InlineKeyboardButton("🔄 Restart", callback_data=f"restart_{name}")
+    logs_btn = types.InlineKeyboardButton("📜 Live Logs", callback_data=f"logs_{name}")
+    backup_btn = types.InlineKeyboardButton("📦 Backup ZIP", callback_data=f"backup_{name}")
+    delete_btn = types.InlineKeyboardButton("🗑️ Delete", callback_data=f"delete_{name}")
+    back_btn = types.InlineKeyboardButton("⬅️ Projects List", callback_data="btn_list")
 
     markup.add(toggle_btn, restart_btn)
     markup.add(logs_btn, backup_btn)
@@ -342,17 +362,18 @@ def get_project_keyboard(name):
     markup.add(back_btn)
     return markup
 
-# --- ٹیلیگرام میسج ہینڈلرز ---
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+
 @bot.message_handler(commands=["start", "menu"])
 @admin_only
 def cmd_start(message):
     text = (
-        "👑 <b>انڈسٹری گریڈ ٹیلیگرام بوٹ ہوسٹنگ مینیجر</b>\n\n"
-        "⚡ <b>سپورٹڈ فائلز:</b>\n"
-        "• <b>سنگل پائیتھن فائل:</b> <code>.py</code> (لائبریریاں خودکار اسکین ہوں گی)\n"
-        "• <b>مکمل پروجیکٹ آرکائیو:</b> <code>.zip</code> (خود بخود ان زپ اور کنفیگر ہوگا)\n\n"
-        "💾 <b>بیک اپ سسٹم:</b> ہر پروجیکٹ کا علیحدہ یا پورے سرور کا ایک ساتھ زپ بیک اپ ٹیلیگرام پر دستیاب ہے۔\n\n"
-        "👇 نیچے دیے گئے مینیو سے کنٹرول کریں یا کوئی بھی فائل بھیجیں:"
+        "👑 <b>Enterprise Telegram Bot Host Manager (24/7 Online)</b>\n\n"
+        "⚡ <b>System Status:</b>\n"
+        "• <b>Auto-Restart Watchdog:</b> Active (15s polling health check)\n"
+        "• <b>24H Auto-Refresh:</b> Enabled (prevents memory leaks & freezes)\n"
+        "• <b>Deployment:</b> Send any <code>.py</code> or <code>.zip</code> file to deploy\n\n"
+        "👇 Use the dashboard below to control your bots:"
     )
     bot.reply_to(message, text, reply_markup=get_main_keyboard())
 
@@ -366,7 +387,7 @@ def handle_file_upload(message):
     is_zip = file_name.endswith(".zip")
 
     if not (is_py or is_zip):
-        bot.reply_to(message, "⚠️ <b>ناقابل قبول فارمیٹ:</b> برائے مہربانی صرف <code>.py</code> یا <code>.zip</code> فائل بھیجیں۔")
+        bot.reply_to(message, "⚠️ <b>Invalid File:</b> Please send only <code>.py</code> or <code>.zip</code> archives.")
         return
 
     clean_name = re.sub(r'[^a-zA-Z0-9_]', '', file_name.rsplit('.', 1)[0]).lower()
@@ -374,17 +395,14 @@ def handle_file_upload(message):
         clean_name = f"bot_{int(time.time())}"
 
     project_dir = os.path.join(PROJECTS_DIR, clean_name)
-
-    # اگر پہلے سے چل رہا ہو تو بند کریں
     if clean_name in DEPLOYED_BOTS:
         stop_project(clean_name)
 
-    status_msg = bot.reply_to(message, "⏳ <b>فائل ڈاؤن لوڈ ہو رہی ہے، برائے مہربانی انتظار فرمائیں...</b>")
+    status_msg = bot.reply_to(message, "⏳ <b>Downloading file, please wait...</b>")
 
     try:
         file_info = bot.get_file(doc.file_id)
         downloaded = bot.download_file(file_info.file_path)
-
         os.makedirs(project_dir, exist_ok=True)
 
         if is_py:
@@ -394,7 +412,6 @@ def handle_file_upload(message):
             entry_file = "bot.py"
             runtime = "python"
         elif is_zip:
-            # زپ فائل کو محفوظ کر کے ایکسٹریکٹ کریں
             temp_zip = os.path.join(BACKUPS_TEMP_DIR, f"temp_{clean_name}.zip")
             with open(temp_zip, "wb") as f:
                 f.write(downloaded)
@@ -405,49 +422,44 @@ def handle_file_upload(message):
 
             entry_file, runtime = detect_entry_point(project_dir)
             if not entry_file:
-                bot.edit_message_text("❌ <b>ایرر:</b> زپ فائل میں کوئی قابل عمل فائل (main.py, bot.py، وغیرہ) نہیں ملی۔",
+                bot.edit_message_text("❌ <b>Error:</b> No executable script (bot.py, main.py, etc.) found inside zip.",
                                       chat_id=message.chat.id, message_id=status_msg.message_id)
                 return
 
-        bot.edit_message_text("📦 <b>لائبریریوں کی تنصیب اور انوائرنمنٹ سیٹ اپ ہو رہا ہے...</b>",
+        bot.edit_message_text("📦 <b>Scanning dependencies and configuring environment...</b>",
                               chat_id=message.chat.id, message_id=status_msg.message_id)
 
-        # پیکیجز انسٹال کریں
         install_dependencies(project_dir, runtime)
 
-        # پروجیکٹ رجسٹر کریں
         DEPLOYED_BOTS[clean_name] = {
             "dir": project_dir,
             "entry": entry_file,
             "runtime": runtime,
-            "status": "stopped",
+            "status": "running",
+            "auto_restart": True,
             "process": None
         }
         save_metadata()
 
-        bot.edit_message_text("🚀 <b>پروجیکٹ بوٹ لانچ کیا جا رہا ہے...</b>",
-                              chat_id=message.chat.id, message_id=status_msg.message_id)
-
         success, msg = launch_project(clean_name)
         if success:
             resp_text = (
-                f"✅ <b>پروجیکٹ کامیابی کے ساتھ لائیو ہو گیا!</b>\n\n"
-                f"🏷 <b>نام:</b> <code>{clean_name}</code>\n"
-                f"⚙️ <b>مین فائل:</b> <code>{entry_file}</code>\n"
-                f"🌐 <b>رن ٹائم:</b> <code>{runtime}</code>\n"
-                f"🟢 <b>اسٹیٹس:</b> 24/7 آن لائن"
+                f"✅ <b>Project Successfully Deployed & Online!</b>\n\n"
+                f"🏷 <b>Name:</b> <code>{clean_name}</code>\n"
+                f"⚙️ <b>Entry:</b> <code>{entry_file}</code>\n"
+                f"🛡️ <b>Auto-Restart:</b> Enabled (24/7 Watchdog)\n"
+                f"🟢 <b>Status:</b> Live and running"
             )
             bot.edit_message_text(resp_text, chat_id=message.chat.id, message_id=status_msg.message_id,
                                   reply_markup=get_project_keyboard(clean_name))
         else:
-            bot.edit_message_text(f"❌ <b>اسٹارٹ کرنے میں رکاوٹ:</b>\n<code>{msg}</code>",
+            bot.edit_message_text(f"❌ <b>Startup Failed:</b>\n<code>{msg}</code>",
                                   chat_id=message.chat.id, message_id=status_msg.message_id)
 
     except Exception as e:
-        logging.error(f"اپلوڈ پروسیسنگ خرابی: {e}")
-        bot.edit_message_text(f"❌ پروسیسنگ میں نقص آیا: {str(e)}", chat_id=message.chat.id, message_id=status_msg.message_id)
+        logging.error(f"Upload processing error: {e}")
+        bot.edit_message_text(f"❌ Error: {str(e)}", chat_id=message.chat.id, message_id=status_msg.message_id)
 
-# --- کال بیکس ہینڈلر ---
 @bot.callback_query_handler(func=lambda call: True)
 @admin_only
 def handle_callbacks(call):
@@ -456,7 +468,7 @@ def handle_callbacks(call):
     if data == "btn_list":
         bot.answer_callback_query(call.id)
         if not DEPLOYED_BOTS:
-            bot.edit_message_text("📭 فی الوقت کوئی ڈپلائے شدہ پروجیکٹ موجود نہیں ہے۔",
+            bot.edit_message_text("📭 No deployed projects found.",
                                   chat_id=call.message.chat.id, message_id=call.message.message_id,
                                   reply_markup=get_main_keyboard())
             return
@@ -464,107 +476,99 @@ def handle_callbacks(call):
         markup = types.InlineKeyboardMarkup(row_width=1)
         for name, info in DEPLOYED_BOTS.items():
             icon = "🟢" if info.get("status") == "running" else "🔴"
-            lang = "🐍" if info.get("runtime") == "python" else "⚡"
-            markup.add(types.InlineKeyboardButton(f"{icon} {lang} {name}", callback_data=f"manage_{name}"))
-        markup.add(types.InlineKeyboardButton("⬅️ واپس مینیو", callback_data="btn_home"))
+            markup.add(types.InlineKeyboardButton(f"{icon} {name}", callback_data=f"manage_{name}"))
+        markup.add(types.InlineKeyboardButton("⬅️ Back to Menu", callback_data="btn_home"))
 
-        bot.edit_message_text("📋 <b>آپ کے تمام ڈپلائے شدہ پروجیکٹس:</b>\nتفصیل اور کنٹرول کے لیے پروجیکٹ منتخب کریں:",
+        bot.edit_message_text("📋 <b>Deployed Projects List:</b>",
                               chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
 
     elif data == "btn_home":
         bot.answer_callback_query(call.id)
-        bot.edit_message_text("👑 <b>ایڈمن ڈیش بورڈ:</b>", chat_id=call.message.chat.id,
+        bot.edit_message_text("👑 <b>Admin Dashboard:</b>", chat_id=call.message.chat.id,
                               message_id=call.message.message_id, reply_markup=get_main_keyboard())
 
     elif data == "btn_status":
         bot.answer_callback_query(call.id)
-        running = len([b for b in DEPLOYED_BOTS.values() if b.get("status") == "running"])
-        total = len(DEPLOYED_BOTS)
+        running = sum(1 for b in DEPLOYED_BOTS.values() if b.get("status") == "running")
         text = (
-            "📊 <b>سرور مانیٹر اسٹیٹس:</b>\n\n"
-            f"📁 <b>کُل پروجیکٹس:</b> {total}\n"
-            f"🟢 <b>آن لائن بوٹس:</b> {running}\n"
-            f"🔴 <b>آف لائن بوٹس:</b> {total - running}\n"
-            f"🌐 <b>Keep-Alive ویب سرور:</b> ایکٹیو (24/7)"
+            "📊 <b>Server Monitor & Health Status:</b>\n\n"
+            f"📁 <b>Total Projects:</b> {len(DEPLOYED_BOTS)}\n"
+            f"🟢 <b>Online Bots:</b> {running}\n"
+            f"🔴 <b>Offline Bots:</b> {len(DEPLOYED_BOTS) - running}\n"
+            f"🛡️ <b>Watchdog Engine:</b> Active (Auto-Heal Enabled)\n"
+            f"⏳ <b>24-Hour Refresh:</b> Active (Prevents Freezes)\n"
+            f"🌐 <b>Keep-Alive Server:</b> 24/7 Online"
         )
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("⬅️ واپس مینیو", callback_data="btn_home"))
+        markup.add(types.InlineKeyboardButton("⬅️ Back to Menu", callback_data="btn_home"))
         bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
 
     elif data == "btn_help":
         bot.answer_callback_query(call.id)
         msg = (
-            "ℹ️ <b>بوٹ ڈپلائمنٹ رہنمائی:</b>\n\n"
-            "1. <b>سنگل فائل:</b> براہ راست <code>.py</code> فائل بھیجیں، بوٹ خود بخود امپورٹس تلاش کر کے پیکجز انسٹال کرے گا۔\n"
-            "2. <b>پورا پروجیکٹ:</b> اپنے پروجیکٹ فولڈر کی <code>.zip</code> فائل بنا کر بھیجیں۔ یہ خود بخود main.py یا bot.py کو ڈھونڈ کر چلا دے گا۔\n"
-            "3. <b>بیک اپ:</b> ہر پروجیکٹ کے اندر سے یا مین مینیو سے ایک کلک پر زپ بیک اپ اپنے فون میں ڈاؤن لوڈ کریں۔"
+            "ℹ️ <b>Host Manager Features & Guide:</b>\n\n"
+            "1. <b>Upload:</b> Send any <code>.py</code> or <code>.zip</code> file to auto-deploy.\n"
+            "2. <b>Self-Healing:</b> If a bot crashes, the watchdog revives it within 15 seconds.\n"
+            "3. <b>24H Refresh:</b> System runs maintenance daily to clean cached memory and ensure zero freezes.\n"
+            "4. <b>Backups:</b> Download individual or full system backups at any time directly in Telegram."
         )
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("⬅️ واپس مینیو", callback_data="btn_home"))
+        markup.add(types.InlineKeyboardButton("⬅️ Back to Menu", callback_data="btn_home"))
         bot.edit_message_text(msg, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
 
     elif data == "btn_full_backup":
-        bot.answer_callback_query(call.id, "مکمل بیک اپ تیار کیا جا رہا ہے...")
+        bot.answer_callback_query(call.id, "Generating full system backup...")
         zip_path = create_full_system_backup()
         if zip_path and os.path.exists(zip_path):
             with open(zip_path, "rb") as zf:
-                bot.send_document(
-                    call.message.chat.id,
-                    zf,
-                    caption=f"💾 <b>مکمل سسٹم بیک اپ</b>\nتاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nاس میں تمام بوٹس کا ڈیٹا بیس اور کوڈ شامل ہے۔"
-                )
+                bot.send_document(call.message.chat.id, zf, caption="💾 <b>Full System Backup (All Projects & DB)</b>")
             os.remove(zip_path)
         else:
-            bot.send_message(call.message.chat.id, "❌ بیک اپ فائل تیار کرنے میں دشواری پیش آئی۔")
+            bot.send_message(call.message.chat.id, "❌ Failed to create system backup archive.")
 
     elif data == "btn_restart_all":
-        bot.answer_callback_query(call.id, "تمام پروجیکٹس ری اسٹارٹ کیے جا رہے ہیں...")
+        bot.answer_callback_query(call.id, "Restarting all projects...")
         for name in list(DEPLOYED_BOTS.keys()):
-            stop_project(name)
+            stop_project(name, mark_stopped=False)
             time.sleep(0.5)
             launch_project(name)
-        bot.answer_callback_query(call.id, "تمام فعال بوٹس ری اسٹارٹ ہو چکے ہیں!", show_alert=True)
+        bot.answer_callback_query(call.id, "All bots restarted successfully!", show_alert=True)
         cmd_start(call.message)
 
-    # انفرادی پروجیکٹ کے بٹن
     elif data.startswith("manage_"):
         name = data.split("_", 1)[1]
         info = DEPLOYED_BOTS.get(name)
         if not info:
-            bot.answer_callback_query(call.id, "پروجیکٹ نہیں ملا!", show_alert=True)
+            bot.answer_callback_query(call.id, "Project not found!", show_alert=True)
             return
-        status_txt = "🟢 آن لائن" if info.get("status") == "running" else "🔴 بند"
+        status_txt = "🟢 Online (Watchdog Active)" if info.get("status") == "running" else "🔴 Stopped"
         txt = (
-            f"⚙️ <b>پروجیکٹ مینیجر:</b> <code>{name}</code>\n\n"
-            f"📊 <b>اسٹیٹس:</b> {status_txt}\n"
-            f"🎯 <b>اینٹری پوائنٹ:</b> <code>{info.get('entry')}</code>\n"
-            f"🌐 <b>رن ٹائم:</b> <code>{info.get('runtime')}</code>"
+            f"⚙️ <b>Project:</b> <code>{name}</code>\n"
+            f"📊 <b>Status:</b> {status_txt}\n"
+            f"🎯 <b>Entry File:</b> <code>{info.get('entry')}</code>\n"
+            f"🛡️ <b>Crash Protection:</b> 24/7 Auto-Restart"
         )
-        bot.edit_message_text(txt, chat_id=call.message.chat.id, message_id=call.message.message_id,
-                              reply_markup=get_project_keyboard(name))
+        bot.edit_message_text(txt, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_project_keyboard(name))
 
     elif data.startswith("start_"):
         name = data.split("_", 1)[1]
         succ, msg = launch_project(name)
         bot.answer_callback_query(call.id, msg, show_alert=True)
-        bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id,
-                                      reply_markup=get_project_keyboard(name))
+        bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_project_keyboard(name))
 
     elif data.startswith("stop_"):
         name = data.split("_", 1)[1]
-        succ, msg = stop_project(name)
+        succ, msg = stop_project(name, mark_stopped=True)
         bot.answer_callback_query(call.id, msg, show_alert=True)
-        bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id,
-                                      reply_markup=get_project_keyboard(name))
+        bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_project_keyboard(name))
 
     elif data.startswith("restart_"):
         name = data.split("_", 1)[1]
-        stop_project(name)
+        stop_project(name, mark_stopped=False)
         time.sleep(1)
         launch_project(name)
-        bot.answer_callback_query(call.id, f"{name} کامیابی سے ری اسٹارٹ ہو گیا!", show_alert=True)
-        bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id,
-                                      reply_markup=get_project_keyboard(name))
+        bot.answer_callback_query(call.id, f"{name} restarted successfully!", show_alert=True)
+        bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_project_keyboard(name))
 
     elif data.startswith("logs_"):
         name = data.split("_", 1)[1]
@@ -573,47 +577,53 @@ def handle_callbacks(call):
         if log_file and os.path.exists(log_file):
             with open(log_file, "r", encoding="utf-8", errors="ignore") as lf:
                 lines = lf.readlines()
-                last_logs = "".join(lines[-30:]) if lines else "لاگ فائل فی الحال خالی ہے۔"
-            bot.send_message(call.message.chat.id, f"📜 <b>لاگز برائے {name}:</b>\n\n<pre>{last_logs}</pre>")
+                last_logs = "".join(lines[-25:]) if lines else "Log file is currently empty."
+            bot.send_message(call.message.chat.id, f"📜 <b>Logs for {name}:</b>\n\n<pre>{last_logs}</pre>")
         else:
-            bot.answer_callback_query(call.id, "ابھی کوئی لاگز موجود نہیں ہیں!", show_alert=True)
+            bot.answer_callback_query(call.id, "No logs available yet!", show_alert=True)
 
     elif data.startswith("backup_"):
         name = data.split("_", 1)[1]
-        bot.answer_callback_query(call.id, f"{name} کا زپ بیک اپ تیار ہو رہا ہے...")
+        bot.answer_callback_query(call.id, f"Creating backup for {name}...")
         zip_path = create_project_backup(name)
         if zip_path and os.path.exists(zip_path):
             with open(zip_path, "rb") as zf:
-                bot.send_document(
-                    call.message.chat.id,
-                    zf,
-                    caption=f"📦 <b>پروجیکٹ بیک اپ:</b> <code>{name}</code>\nتاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                )
+                bot.send_document(call.message.chat.id, zf, caption=f"📦 <b>Project Backup:</b> <code>{name}</code>")
             os.remove(zip_path)
-        else:
-            bot.send_message(call.message.chat.id, f"❌ پروجیکٹ {name} کا بیک اپ بنانے میں دشواری آئی۔")
 
     elif data.startswith("delete_"):
         name = data.split("_", 1)[1]
-        stop_project(name)
+        stop_project(name, mark_stopped=True)
         info = DEPLOYED_BOTS.pop(name, None)
         if info and os.path.exists(info["dir"]):
             shutil.rmtree(info["dir"], ignore_errors=True)
         save_metadata()
-        bot.answer_callback_query(call.id, f"پروجیکٹ {name} کامیابی سے ڈیلیٹ ہو گیا!", show_alert=True)
+        bot.answer_callback_query(call.id, f"{name} deleted successfully!", show_alert=True)
         cmd_start(call.message)
 
 if __name__ == "__main__":
-    # ڈسک سے سابقہ پروجیکٹس لوڈ کریں
     load_metadata()
 
-    # فلاسکی ویب پورٹ شروع کریں تاکہ ہوسٹنگ پر 24/7 لائیو رہے
-    start_keep_alive()
+    # 1. Flask Keep-Alive Web Server
+    web_thread = Thread(target=launch_flask_server, daemon=True)
+    web_thread.start()
 
-    logging.info("انڈسٹری گریڈ ہوسٹنگ مینیجر سروس شروع ہو چکی ہے۔")
+    # 2. Automated Watchdog and 24-Hour Auto-Restart Engine
+    watchdog_worker = Thread(target=background_watchdog, daemon=True)
+    watchdog_worker.start()
+
+    # Restore previously active projects
+    for p_name, p_info in DEPLOYED_BOTS.items():
+        if p_info.get("status") == "running":
+            launch_project(p_name)
+
+    logging.info("Host Manager and Watchdog service running 24/7.")
+
+    # Crash-proof reconnection loop for long polling
     while True:
         try:
             bot.infinity_polling(timeout=25, long_polling_timeout=20)
-        except Exception as err:
-            logging.error(f"ٹیلیگرام کنکشن ایرر: {err}")
+        except Exception as poll_err:
+            logging.error(f"Network interrupt / connection drop: {poll_err}")
+            logging.info("Reconnecting to Telegram API in 5 seconds...")
             time.sleep(5)
