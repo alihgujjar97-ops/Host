@@ -5,28 +5,25 @@ from datetime import datetime
 from flask import Flask, request, jsonify, render_template_string
 import requests
 
-# Configure logging for production and debugging
+# لاگنگ کنفیگریشن
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s'
 )
 logger = logging.getLogger("TempNumbersApp")
 
-# Panel API & User Credentials
 BASE_URL = "https://tempnumbers.net"
 MASTER_API_TOKEN = "cd178b8a81baad5256e9792ccbdb5feb3b18fea75dca3302b57f80dc8c9c97e"
 
-# Client Credentials for dynamic authentication
 CLIENT_USERNAME = "comebackotp"
 CLIENT_PASSWORD = "comebackotp"
 
-# Database path for storing incoming SMS
 DB_PATH = "sms_records.db"
 
 app = Flask(__name__)
 
 def init_db():
-    """Initializes local SQLite database to store incoming live OTPs."""
+    """لوکل ڈیٹا بیس بنانا تاکہ موصول ہونے والے SMS محفوظ رہ سکیں"""
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -45,14 +42,10 @@ def init_db():
 
 init_db()
 
-# Cached client bearer token
 cached_client_token = None
 
 def get_client_bearer_token(force_refresh=False):
-    """
-    Authenticates client using username & password via /api/gentoken.php
-    and obtains the Bearer token for client-level API operations.
-    """
+    """کلائنٹ کا محفوظ Bearer Token حاصل کرنا"""
     global cached_client_token
     if cached_client_token and not force_refresh:
         return cached_client_token
@@ -67,29 +60,25 @@ def get_client_bearer_token(force_refresh=False):
     }
 
     try:
-        logger.info(f"Authenticating client '{CLIENT_USERNAME}' at {url}...")
+        logger.info(f"کلائنٹ کی تصدیق جاری ہے: {CLIENT_USERNAME}...")
         response = requests.post(url, json=payload, headers=headers, timeout=15)
         data = response.json()
 
         if data.get("access_token"):
             cached_client_token = data.get("access_token")
-            logger.info("Successfully received client Bearer token.")
             return cached_client_token
         elif data.get("token"):
             cached_client_token = data.get("token")
             return cached_client_token
         else:
-            logger.error(f"Failed to obtain client token: {data}")
+            logger.error(f"ٹوکن حاصل کرنے میں ناکامی: {data}")
             return None
     except Exception as exc:
-        logger.error(f"Error connecting to gentoken.php: {exc}")
+        logger.error(f"gentoken.php کے ساتھ رابطہ نہیں ہو سکا: {exc}")
         return None
 
 def fetch_client_numbers(page=1, limit=50, client_id=None):
-    """
-    Fetches numbers allocated or available using tempnumbers API.
-    Uses Master Token by default or fallbacks to client token.
-    """
+    """کلائنٹ کے مختص کردہ نمبرز پینل سے حاصل کرنا"""
     url = f"{BASE_URL}/api/view_mynumbers"
     token = MASTER_API_TOKEN
     
@@ -108,27 +97,27 @@ def fetch_client_numbers(page=1, limit=50, client_id=None):
         response = requests.get(url, headers=headers, params=params, timeout=15)
         return response.json()
     except Exception as exc:
-        logger.error(f"Error fetching numbers: {exc}")
+        logger.error(f"نمبرز حاصل کرنے میں مسئلہ: {exc}")
         return {"status": "error", "message": str(exc)}
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """ریلوے کی چیکنگ کے لیے ہیلتھ اینڈ پوائنٹ"""
+    return jsonify({"status": "healthy", "service": "TempNumbers Webhook Server"}), 200
 
 @app.route('/webhook', methods=['POST'])
 @app.route('/', methods=['POST'])
 def receive_webhook():
-    """
-    Main Webhook endpoint configured on tempnumbers.net dashboard.
-    Captures incoming SMS/OTP sent by the platform.
-    """
+    """مین ویب ہک جہاں پینل سے آنے والے SMS پکڑے جاتے ہیں"""
     payload = request.get_json(silent=True) or request.form.to_dict()
-    logger.info(f"Incoming Webhook Payload: {payload}")
+    logger.info(f"موصول شدہ ویب ہک ڈیٹا: {payload}")
 
     if not payload:
-        return jsonify({"status": "error", "message": "No payload received"}), 400
+        return jsonify({"status": "error", "message": "کوئی ڈیٹا موصول نہیں ہوا"}), 400
 
-    # Extract fields from webhook format
     client_id = payload.get("clientid", "")
     data_block = payload.get("data", {})
 
-    # If payload is flat or nested
     if isinstance(data_block, dict) and data_block:
         date_time = data_block.get("datetime", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         phone_num = data_block.get("num", "")
@@ -142,7 +131,6 @@ def receive_webhook():
         sms_text = payload.get("sms", payload.get("message", ""))
         payout = payload.get("clpayout", "0.00")
 
-    # Store message in SQLite database
     try:
         with sqlite3.connect(DB_PATH) as conn:
             cursor = conn.cursor()
@@ -152,16 +140,16 @@ def receive_webhook():
             """, (date_time, phone_num, sender_cli, sms_text, client_id, str(payout), str(payload)))
             conn.commit()
     except Exception as exc:
-        logger.error(f"Error saving message to database: {exc}")
+        logger.error(f"ڈیٹا بیس میں محفوظ کرنے میں مسئلہ: {exc}")
 
     return jsonify({
         "status": "success",
-        "message": "Webhook received and stored successfully"
+        "message": "SMS کامیابی سے موصول اور محفوظ ہو گیا ہے"
     }), 200
 
 @app.route('/api/sms', methods=['GET'])
 def get_stored_sms():
-    """Returns all received SMS/OTPs as JSON."""
+    """محفوظ شدہ ایس ایم ایس JSON فارمیٹ میں دکھانا"""
     limit = request.args.get('limit', 50, type=int)
     messages = []
     with sqlite3.connect(DB_PATH) as conn:
@@ -174,7 +162,7 @@ def get_stored_sms():
 
 @app.route('/api/numbers', methods=['GET'])
 def get_numbers_endpoint():
-    """API endpoint to view allocated numbers for this client."""
+    """کلائنٹ کے مختص کردہ تمام نمبرز دکھانا"""
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 20, type=int)
     data = fetch_client_numbers(page=page, limit=limit)
@@ -182,7 +170,7 @@ def get_numbers_endpoint():
 
 @app.route('/api/token', methods=['GET', 'POST'])
 def get_token_endpoint():
-    """Generates and returns the latest client bearer token."""
+    """کلائنٹ کا لائیو ٹوکن دکھانا"""
     token = get_client_bearer_token(force_refresh=True)
     if token:
         return jsonify({
@@ -191,11 +179,11 @@ def get_token_endpoint():
             "token_type": "Bearer",
             "access_token": token
         })
-    return jsonify({"status": "error", "message": "Failed to generate client token"}), 500
+    return jsonify({"status": "error", "message": "ٹوکن حاصل نہیں ہو سکا"}), 500
 
 @app.route('/', methods=['GET'])
 def dashboard():
-    """Interactive visual dashboard to view live OTPs and allocated numbers."""
+    """ریئل ٹائم لائیو ڈیش بورڈ"""
     messages = []
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
@@ -210,7 +198,7 @@ def dashboard():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>TempNumbers - Client OTP & SMS Panel</title>
+        <title>TempNumbers - Live Client OTP Panel</title>
         <style>
             * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
             body { background: #0f172a; color: #f8fafc; padding: 20px; }
@@ -236,7 +224,7 @@ def dashboard():
             <div class="header">
                 <div>
                     <h2>OTP & SMS Live Client Receiver</h2>
-                    <p style="color: #94a3b8; font-size: 14px;">TempNumbers.net Integrated Receiver</p>
+                    <p style="color: #94a3b8; font-size: 14px;">TempNumbers Integrated Panel</p>
                 </div>
                 <span class="badge">Online & Active</span>
             </div>
@@ -251,10 +239,11 @@ def dashboard():
                     <strong style="color: #4ade80;">Listening on /webhook</strong>
                 </div>
                 <div class="info-box">
-                    <span>Quick Links</span>
-                    <div style="margin-top: 5px;">
-                        <a href="/api/numbers" target="_blank" class="btn" style="padding: 4px 8px; font-size: 12px;">View Numbers</a>
-                        <a href="/api/token" target="_blank" class="btn" style="padding: 4px 8px; font-size: 12px; background: #059669;">Get Token</a>
+                    <span>Quick Controls</span>
+                    <div style="margin-top: 6px;">
+                        <a href="/api/numbers" target="_blank" class="btn" style="padding: 4px 8px; font-size: 12px;">Numbers</a>
+                        <a href="/api/token" target="_blank" class="btn" style="padding: 4px 8px; font-size: 12px; background: #059669;">Token</a>
+                        <a href="/api/sms" target="_blank" class="btn" style="padding: 4px 8px; font-size: 12px; background: #d97706;">SMS JSON</a>
                     </div>
                 </div>
             </div>
@@ -262,7 +251,7 @@ def dashboard():
             <div class="card">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                     <h3>Live Received OTPs / Messages ({{ messages|length }})</h3>
-                    <button onclick="location.reload()" class="btn">Refresh Now</button>
+                    <button onclick="location.reload()" class="btn">Refresh</button>
                 </div>
                 {% if messages %}
                 <table>
@@ -288,7 +277,7 @@ def dashboard():
                     </tbody>
                 </table>
                 {% else %}
-                <p style="color: #94a3b8; padding: 20px 0; text-align: center;">No messages received yet. Send a test SMS from the TempNumbers panel.</p>
+                <p style="color: #94a3b8; padding: 20px 0; text-align: center;">ابھی تک کوئی نیا میسج موصول نہیں ہوا۔ پینل سے ٹیسٹ ایس ایم ایس بھیج کر چیک کریں۔</p>
                 {% endif %}
             </div>
         </div>
@@ -298,10 +287,6 @@ def dashboard():
     return render_template_string(html_template, messages=messages, username=CLIENT_USERNAME)
 
 if __name__ == '__main__':
-    # Initial token generation check on startup
-    get_client_bearer_token()
-    
-    # Run server on port 8080 (standard for Railway, Render, etc.)
+    # لوکل ٹیسٹنگ کے لیے
     port = int(os.environ.get("PORT", 8080))
-    logger.info(f"Starting application on port {port}...")
     app.run(host='0.0.0.0', port=port, debug=False)
