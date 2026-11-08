@@ -1,3 +1,11 @@
+import os
+import sys
+
+# پروجیکٹ کا اصل پاتھ خودکار طریقے سے رجسٹر کریں
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
 import re
 import html
 import time
@@ -9,7 +17,6 @@ from core.common import (
     STANDARD_HEADERS, WORD_NUMBERS, parse_exact_panel_row
 )
 
-# Comebackotp کے اصل ٹیبل کالمز
 NUMBERS_HEADERS = ["id", "range", "number", "cli", "status", "created_at"]
 SMS_HEADERS = ["id", "date", "range", "number", "cli", "message", "status"]
 
