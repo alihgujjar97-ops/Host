@@ -1,5 +1,11 @@
 import os
 import sys
+
+# موجودہ ڈائریکٹری کو پائتھن پاتھ میں خودکار شامل کریں تاکہ 'core' فورا مل جائے
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
+
 import time
 import json
 import importlib
@@ -18,17 +24,12 @@ REGISTRY_LOCK = threading.RLock()
 
 
 def auto_load_all_panels():
-    """
-    panels فولڈر میں موجود ہر فائل کو خودکار لوڈ کرتا ہے۔
-    آپ کو server.py میں کبھی بھی کسی پینل کا نام ہاتھ سے لکھنے کی ضرورت نہیں!
-    """
+    """panels فولڈر کے تمام ماڈیولز خودکار لوڈ کرے گا"""
     import panels
     loaded_count = 0
-    package = panels
-    for _, module_name, _ in pkgutil.iter_modules(package.__path__):
+    for _, module_name, _ in pkgutil.iter_modules(panels.__path__):
         try:
             mod = importlib.import_module(f"panels.{module_name}")
-            # کلاسز تلاش کریں جو BasePanel سے تعلق رکھتی ہوں
             for _, obj in inspect.getmembers(mod, inspect.isclass):
                 if issubclass(obj, BasePanel) and obj is not BasePanel:
                     instance = obj()
@@ -38,7 +39,7 @@ def auto_load_all_panels():
         except Exception as e:
             print(f"Error loading panels.{module_name}: {e}")
 
-    print(f"✅ Auto-Loaded {loaded_count} panels automatically from panels/ folder.")
+    print(f"✅ Auto-Loaded {loaded_count} panels successfully.")
 
 
 def _sync_single_panel(panel, do_numbers):
@@ -84,6 +85,7 @@ class APIHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
 
     def do_GET(self):
@@ -176,9 +178,7 @@ class APIHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    # خودکار تمام پینلز لوڈ کرے گا
     auto_load_all_panels()
-
     threading.Thread(target=background_sync_worker, daemon=True).start()
     server_address = ("0.0.0.0", PORT)
     httpd = ThreadedHTTPServer(server_address, APIHandler)
