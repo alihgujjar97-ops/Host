@@ -139,3 +139,6 @@ class Ints135Panel(BasePanel):
             self.sms_cache = all_sms
             self.last_sms_sync = time.time()
         return all_sms
+if __name__ == "__main__":
+    import server
+    server.main()
